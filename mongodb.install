@@ -1,0 +1,54 @@
+<?php
+/**
+ * @file
+ * Installation for the module
+ */
+
+/**
+ * Implementation hook_requirements().
+ */
+function mongodb_requirements($phase) {
+  module_load_include('module', 'mongodb');
+  $requirements = array();
+  // Ensure translations don't break at install time
+  $t = get_t();
+
+  if (!extension_loaded('mongo')) {
+    $requirements['mongodb'] = array(
+      'title' => $t('Mongo database'),
+      'value' => $t('Not found'),
+      'description' => $t('Mongodb requires the PHP MongoDB extension to be installed.'),
+      'severity' => REQUIREMENT_ERROR
+    );
+  }
+  else {
+    try {
+      $mongo = mongodb_instance();
+      $res = array();
+      if ($mongo) {
+        $res = $mongo->execute("function() { return db.version(); }");
+      }
+      $requirements['mongodb'] = array(
+        'title'     => $t('Mongo database'),
+        'value'     => isset($res['retval']) ? $res['retval'] : t('unknown'),
+        'severity'  => REQUIREMENT_OK
+      );
+    }
+    catch (Exception $e) {
+      $requirements['mongodb'] = array(
+        'title'     => $t('Mongo database'),
+        'value'     => $e->getMessage(),
+        'severity'  => REQUIREMENT_ERROR
+      );
+    }
+  }
+  return $requirements;
+}
+
+/**
+ * Implementation of hook_update().
+ */
+function mongodb_update_6000() {
+  $return[] = update_sql("UPDATE system SET weight =  -1 WHERE type = 'module' AND name = 'mongodb'");
+  return $return;
+}

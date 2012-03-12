@@ -1,0 +1,5 @@
+name = MongoDB
+description = Base API for mongodb integration
+package = MongoDB
+version = 6.x-1
+core = 6.x

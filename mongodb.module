@@ -1,0 +1,342 @@
+<?php
+// $Id$
+
+/**
+ * @file
+ * Base API for MongoDB integration
+ */
+
+define('_MONGODB_LOG', 'mongodb');
+define('_MONGODB_ENABLED', variable_get('mongodb_enabled', FALSE));
+
+/**
+ * Implementation of hook_menu()
+ */
+function mongodb_menu() {
+  $items = array();
+
+  $items['admin/settings/mongodb'] = array(
+    'title' => 'MongoDB',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('mongodb_settings_form'),
+    'access arguments' => array('administer configuration'),
+    'file' => 'mongodb.admin.inc',
+  );
+
+  return $items;
+}
+
+/**
+ * Returns MongoDB instance
+ */
+function mongodb_instance() {
+  static $mongo_db;
+  static $no_connection = FALSE;
+
+  if ($no_connection) {
+    return NULL;
+  }
+  
+  if (isset($mongo_db)) {
+    return $mongo_db;
+  }
+
+  if (!class_exists('Mongo') || !_MONGODB_ENABLED) {
+    $no_connection = TRUE;
+    return NULL;
+  }
+
+  $conf = variable_get('mongo_url', '');
+  $url  = parse_url($conf);
+  if (empty($url['host'])) {
+    return NULL;
+  }
+
+  try {
+    $mongo_server = new Mongo($url['host']);
+
+    $mongo_db = $mongo_server->selectDB(ltrim($url['path'], '/'));
+
+    if ($url['user']) {
+      if (!isset($url['pass'])) {
+        $url['pass'] = '';
+      }
+
+      $mongo_db->authenticate($url['user'], $url['pass']);
+    }
+  }
+  catch (Exception $ex) {
+    watchdog(_MONGODB_LOG, 'Exception @ex', array('@ex' => $ex->getMessage()));
+    $no_connection = TRUE;
+    return NULL;
+  }
+
+  return $mongo_db;
+}
+
+/**
+ * Returns MongoDB collection
+ */
+function mongodb_collection($collection_name) {
+  global $db_prefix;
+  static $connections, $simpletest_prefix, $collections;
+
+  if (!_MONGODB_ENABLED) {
+    return NULL;
+  }
+
+  // We call this function earlier than the database is initalized so we would
+  // read the parent collection without this.
+  if (!isset($simpletest_prefix)) {
+    if (isset($_SERVER['HTTP_USER_AGENT']) && preg_match("/^(simpletest\d+);/", $_SERVER['HTTP_USER_AGENT'], $matches)) {
+      $simpletest_prefix = $matches[1];
+    }
+    else {
+      $simpletest_prefix = '';
+    }
+  }
+  // However, once $db_prefix is filled by the database, the simpletest_prefix
+  // is no longer needed.
+  if ($simpletest_prefix && $db_prefix && strpos($db_prefix, $simpletest_prefix) !== FALSE) {
+    $simpletest_prefix = '';
+  }
+  $collection_name = $db_prefix . $simpletest_prefix . $collection_name;
+
+  $mongo = mongodb_instance();
+
+  if (!$mongo) {
+    return NULL;
+  }
+
+  if (!isset($collections[$collection_name])) {
+    $collections[$collection_name] = $mongo->selectCollection($collection_name);
+  }
+  return $collections[$collection_name];
+}
+
+/**
+ * MongoDB query wrapper
+ */
+function mongodb_query($collection_name, $query = array(), $sort = array(), $limit = 0, $group = '') {
+  if (!_MONGODB_ENABLED) {
+    return array();
+  }
+  
+  $result = array();
+
+  // Select collection  
+  $collection = mongodb_collection($collection_name);
+
+  if (!$collection) {
+    return $result;
+  }
+  
+  // Set query
+  $mongo_result = $collection->find($query);
+  
+  // Set sorting criteria
+  $mongo_result->sort($sort); 
+  
+  // Set limit if defined
+  if ($limit > 0) {
+    $mongo_result->limit($limit);
+  }
+  
+  while ($item = $mongo_result->getNext()) {
+    $result[] = $item;
+  }
+  
+  // Empty memory
+  unset($collection, $mongo_result);
+  
+  return $result;
+}
+
+/**
+ * MongoDB count query wrapper
+ */
+function mongodb_query_count($collection_name, $query = array()) {
+  if (!_MONGODB_ENABLED) {
+    return 0;
+  }
+
+  // Select collection  
+  $collection = mongodb_collection($collection_name);
+  
+  // Get count
+  $count = $collection->count($query);
+  
+  // Empty memory
+  unset($collection);
+  
+  return $count;
+}
+
+/**
+ * Implementation of hook_views_api
+ *
+ */
+function mongodb_views_api() {
+  return array(
+    'api' => 2,
+    'path' => drupal_get_path('module', 'mongodb'),
+    'template path' => 'mongodb.views.inc'
+  );
+}
+
+/**
+ * Implementation of hook_theme()
+ */
+function mongodb_theme() {
+  $theme = array();
+
+  // @TODO refactor this, row style should work without this definition
+  $theme['mongodb_views_view_row_node'] = array(
+    'arguments' => array(
+      'results' => NULL,
+      'options' => NULL,
+      'row'     => NULL,
+      'alias'   => NULL,
+    ),
+    'path'      => drupal_get_path('module', 'mongodb') . '/templates/plugins',
+    'template'  => 'mongodb-views-view-row-node',
+  );
+  return $theme;
+}
+
+/**
+ * Implementation of hook_ctools_plugin_directory
+ */
+function mongodb_ctools_plugin_directory($module, $plugin) {
+  if ($module == 'ctools') {
+    return 'plugins/' . $plugin;
+  }
+}
+
+/**
+ * Pull node objects from mongo with fallback to MySQL
+ * @param array $nids
+ * @return array
+ */
+function mongodb_nodes_get_from_mongo($nids) {
+  $nodes = array();
+
+  if (!empty($nids) && is_array($nids)) {
+    $nodes_to_load = array();
+    if (mongodb_node_mongo_available()) {
+      $collection = mongodb_collection(_mongodb_node_collection_name());
+      if ($collection) {
+        foreach($nids as &$nid) {
+          $nid = (int) $nid;
+        }
+        $result = $collection->find(array('nid' => array('$in' => $nids)));
+
+        while ($record = $result->getNext()) {
+          $nodes[$record['nid']] = (object) $record;
+        }
+
+        $nodes_to_load = array_diff($nids, array_keys($nodes));
+      }
+      else {
+        watchdog(_MONGODB_LOG, 'There was an exception while fetch noderefs from MongoDB.');
+        //Load all nodes from MySQL
+        $nodes_to_load = $nids;
+      }
+    }
+    else {
+      $nodes_to_load = $nids;
+    }
+
+    //Pull all missed nodes from MySQL
+    foreach ($nodes_to_load as $node_to_load) {
+      $nodes[$node_to_load] = node_load($node_to_load);
+    }
+  }
+
+  return $nodes;
+}
+
+/**
+ * Template helper for theme_views_view_row_node
+ */
+function mongodb_preprocess_views_view_row_node_mongodb(&$vars) {
+  $options = $vars['options'];
+  $nid = $vars['row']->{$vars['field_alias']};
+  $vars['row']->nid = $vars['row']->{$vars['field_alias']};
+
+  if (!is_numeric($nid)) {
+    return;
+  }
+  // Make sure the variables are defined.
+  $vars['node'] = '';
+  $vars['comments'] = '';
+  //Look up node in cache
+  if ($node = mongodb_node_static_storage_set($nid)) {
+    _mongodb_node_render($vars, $node, $options);
+    return;
+  }
+
+  // if not include variable mongodb
+  if ($options['load_node'] == FALSE || !mongodb_node_mongo_available()) {
+    $node = node_load($nid);
+    mongodb_node_static_storage_set($node);
+    _mongodb_node_render($vars, drupal_clone($node), $options);
+  }
+  else {
+    $nids = array();
+    foreach ($vars['view']->result as &$value) {
+      //If node already cached, don't pull it
+      $nid_to_check = $value->{$vars['field_alias']};
+      $value->nid = $value->{$vars['field_alias']};
+      if (!mongodb_node_static_storage_get($nid_to_check)) {
+        $nids[$nid_to_check] = (int) $nid_to_check;
+      }
+    }
+    $nodes = mongodb_nodes_get_from_mongo($nids);
+    //Put all to cache
+    foreach ($nodes as $node) {
+      mongodb_node_static_storage_set($node);
+    }
+
+    if (is_object($nodes[$nid])) {
+      if ($options['build_mode'] == 'node_news') {
+        unset($nodes[$nid]->field_news_content);
+      }
+      
+      _mongodb_node_render($vars, drupal_clone($nodes[$nid]), $options);
+    }
+  }
+}
+
+/**
+ * Node view
+ *
+ * @param $vars
+ * @param object $node
+ *
+ * @see mongodb_preprocess_views_view_row_node_mongodb()
+ */
+function _mongodb_node_render(&$vars, $node, $options) {
+  $node->view = $vars['view'];
+  $node->build_mode = ($options['build_mode'] == 'teaser' || $options['build_mode'] == 'full') ? NODE_BUILD_NORMAL : $options['build_mode'];
+
+  $vars['origin_node'] = $node;
+  $vars['node'] = node_view($node, $options['build_mode'] == 'teaser', FALSE, $options['links']);
+  if (!empty($options['comments']) && function_exists('comment_render')) {
+    $vars['comments'] = comment_render($node);
+  }
+}
+
+/**
+ * Invoke hook_export().
+ */
+//function mongodb_export() {
+//  module_invoke_all('mongodb_export');
+//}
+
+/**
+ * Invoke hook_ensure_index().
+ */
+function mongodb_ensure_index() {
+  module_invoke_all('mongodb_ensure_index');
+}

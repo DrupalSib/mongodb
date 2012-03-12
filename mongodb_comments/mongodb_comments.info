@@ -1,0 +1,7 @@
+; $Id$
+name = MongoDB Comments
+description = MongoDB as a "permanent cache storage" for comments
+package = MongoDB
+version = 6.x-1
+core = 6.x
+dependencies[] = "mongodb"

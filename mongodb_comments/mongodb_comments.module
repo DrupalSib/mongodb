@@ -1,0 +1,256 @@
+<?php
+/**
+ * @file
+ * MongoDB as a "permanent cache storage" for comments
+ */
+
+/**
+ * Save comment to mongo
+ * @param array $comment
+ */
+function _mongodb_comments_save_comment($comment) {
+  $collection = mongodb_collection('comments');
+  if (!$collection) {
+    return FALSE;
+  }
+
+  $fields = _mongodb_comments_allowed_fields();
+
+  foreach ($comment as $key => $value) { // Unset not allowed fields
+    if (in_array($key, $fields) === FALSE) {
+      unset($comment[$key]);
+      continue;
+    }
+    if (is_numeric($value)) { // Cast numeric to int
+      $comment[$key] = (int) $value;
+    }
+  }
+  
+  // Update mongodb record
+  return $collection->update(array('cid' => $comment['cid']), $comment, array('upsert' => TRUE));
+}
+
+/**
+ * Delete comment from mongo
+ * @param array $comment
+ */
+function _mongodb_comments_delete_comment($cid) {
+  $collection = mongodb_collection('comments');
+  if (!$collection) {
+    return;
+  }
+  $collection->remove(array('cid' => (int) $cid));
+}
+
+/**
+ * Implementation of hook_comment().
+ */
+function mongodb_comments_comment(&$a1, $op) {
+  if (!_MONGODB_ENABLED) {
+    return;
+  }
+
+  $nid = is_object($a1) ? $a1->nid : $a1['nid'];
+  $cid = is_object($a1) ? $a1->cid : $a1['cid'];
+
+  switch ($op) {
+    case 'insert':
+    case 'update':
+    case 'publish':
+    case 'unpublish':
+      // Get comment node
+      $node = mongodb_node_load($nid);
+      // Is cache enabled for node
+      
+      if ($node && !empty($node->type) || !variable_get('mongodb_node_sync_' . $node->type)) {
+        if (is_array($a1)) {
+          $a1['node_type'] = $node->type;
+        }
+        elseif (is_object($a1)) {
+          $a1->node_type = $node->type;
+        }
+
+        _mongodb_comments_save_comment(is_array($a1) ? $a1 : (array) $a1);
+      }
+      break;
+
+    case 'delete':
+      _mongodb_comments_delete_comment($cid);
+      break;
+  }
+}
+
+/**
+ * Provides then list of fields allowed to store in mongo.
+ *
+ * @staticvar array $fields
+ * @return string
+ */
+function _mongodb_comments_allowed_fields() {
+  static $fields = array('cid', 'pid', 'nid', 'uid', 'subject', 'comment',
+      'hostname', 'timestamp', 'status',  'format', 'thread', 'name',
+      'mail', 'homepage', 'node_type');
+  return $fields;
+}
+
+/**
+ * Implementation of hook_nodeapi().
+ */
+function mongodb_comments_nodeapi(&$node, $op, $a3 = NULL, $a4 = NULL) {
+  switch ($op) {
+    case 'delete' :
+      $collection = mongodb_collection('comments');
+      if (!$collection) {
+        return;
+      }
+      $collection->remove(array('nid' => $node->nid));
+      break;
+  }
+}
+
+/**
+ * Implementation of hook_mongodb_export().
+ *
+ * @param bool $reset
+ * @param int $limit
+ * @param array $type
+ */
+//function mongodb_comments_mongodb_export($reset = FALSE, $limit = NULL, $type = array()) {
+//  $collection = mongodb_collection('comments');
+//  $success = 0;
+//  $faild = 0;
+//
+//  $query = 'SELECT c.*, n.type AS node_type FROM {comments} c ' .
+//           'JOIN {node} n ON n.nid = c.nid';
+//  $result = db_query($query);
+//  while ($item = db_fetch_array($result)) {
+//    try {
+//      _mongodb_comments_save_comment($item);
+//      $success++;
+//    } catch (Exception $ex) {
+//      watchdog(_MONGODB_LOG, 'Can\'t export comment cid @cid. Exception: $ex',
+//              array(
+//                '@cid' => !empty($item['cid']) ? $item['cid'] : '<unknown>',
+//                '@ex' => $ex->getMessage()
+//              ));
+//      $faild++;
+//    }
+//  }
+//  drupal_set_message(t('Exported comments success/faild: @success/@faild',
+//          array('@success' => $success, '@faild' => $faild)));
+//}
+
+/**
+ * Implementation of hook_mongodb_ensure_index().
+ */
+function mongodb_comments_mongodb_ensure_index() {
+  $mongo = mongodb_instance();
+
+  if (!$mongo) {
+    return;
+  }
+
+  // Create collection for comments
+  $mongo->createCollection('comments');
+
+  $collection = $mongo->selectCollection('comments');
+  // Clean indexes
+  $collection->deleteIndexes();
+  // Ensure indexes
+  $collection->ensureIndex(array('cid' => 1), array('background' => TRUE, 'unique' => TRUE, 'dropDups' => TRUE));
+  $collection->ensureIndex(array('pid' => 1), array('background' => TRUE));
+  $collection->ensureIndex(array('nid' => 1), array('background' => TRUE));
+  $collection->ensureIndex(array('uid' => 1), array('background' => TRUE));
+  $collection->ensureIndex(array('status' => 1), array('background' => TRUE));
+  $collection->ensureIndex(array('format' => 1), array('background' => TRUE));
+  $collection->ensureIndex(array('thread' => 1), array('background' => TRUE));
+
+  drupal_set_message(t('Ensured indexes for comments'));
+}
+
+/**
+ * Check is mongodb available
+ *
+ * @return bool
+ */
+function mongo_comments_mongo_available() {
+  return variable_get('mongodb_enabled', FALSE)
+         && mongodb_collection(_mongodb_node_collection_name());
+}
+
+
+/**
+ * Get comment by cids
+ *
+ * @param array $cids
+ * @return array
+ */
+function mongo_comments_comment_get_by_cids($cids) {
+  // Mongodb way
+  if (mongo_comments_mongo_available()) {
+    $comment = mongodb_query('comments',
+                              array('cid' => array('$in' => $cids))
+                              );
+    $comments = array();
+
+    if (is_array($comment)) {
+      foreach ($comment as $key => $value) {
+        $comments[$value['cid']] = (object) $value;
+      }
+    }
+    $comments_to_load = array_diff($cids, array_keys($comments));
+    if (!empty($comments_to_load)) {
+      if (count($comments_to_load) > 1) {
+        $placeholder = " IN (" . implode(', ', array_fill(0, sizeof($comments_to_load), '%d')) . ")";
+      }
+      else {
+        $placeholder = " = %d";
+      }
+      // Pull all missed comments from MySQL
+      $cresult = db_query("SELECT c.cid as cid, c.pid, c.nid, c.subject, c.comment, c.format, c.timestamp, c.name, c.mail, c.homepage, u.uid, u.name AS registered_name, u.signature, u.picture, u.data, c.thread, c.status FROM {comments} c INNER JOIN {users} u ON c.uid = u.uid WHERE c.cid $placeholder", $comments_to_load);
+      while ($comment = db_fetch_object($cresult)) {
+        $comments[$comment->cid] = $comment;
+      }
+      watchdog(_MONGODB_LOG, 'There was an error while fetch comments from MongoDB. ' .
+                              'Following comments are not loaded: %cids', array('%cids' => implode(', ', $comments_to_load)));
+    }
+    
+    $comments = _mongo_comments_comment_sort_by_cids($cids, $pre_comments);
+    return $comments;
+  }
+  // If mongo unavailable - load comments from MySQL.
+  else {
+    if (count($cids) > 1) {
+      $placeholder = " IN (" . implode(', ', array_fill(0, sizeof($cids), '%d')) . ")";
+    }
+    else {
+      $placeholder = " = %d";
+    }
+    $cresult = db_query("SELECT c.cid as cid, c.pid, c.nid, c.subject, c.comment, 
+      c.format, c.timestamp, c.name, c.mail, c.homepage, u.uid, u.name AS registered_name,
+      u.signature, u.picture, u.data, c.thread, c.status FROM {comments} c INNER JOIN {users} u ON c.uid = u.uid
+      WHERE c.cid $placeholder", $cids);
+    while ($comment = db_fetch_object($cresult)) {
+      $pre_comments[$comment->cid] = $comment;
+    }
+    
+    $comments = _mongo_comments_comment_sort_by_cids($cids, $pre_comments);
+    return $comments;
+  }
+}
+
+/**
+ * sort comment by cids
+ *
+ * @param array $cids
+ * @param array $pre_comments
+ * @return array
+ */
+function _mongo_comments_comment_sort_by_cids($cids, $pre_comments) {
+  foreach ($cids as $cid) {
+    if (!empty($pre_comments[$cid])) {
+      $comments[$cid] = $pre_comments[$cid];
+    }
+  }
+  return $comments;
+}

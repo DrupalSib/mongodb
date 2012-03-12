@@ -1,0 +1,288 @@
+<?php
+/**
+ * @file
+ * MongoDB as a "permanent cache storage" for nodes
+ */
+
+/**
+ * Implementation of hook_form_alter().
+ */
+function mongodb_node_form_alter(&$form, $form_state, $form_id) {
+  // Add the node-type settings option to activate the mongo db permanent data storage
+  if ($form_id == 'node_type_form') {
+    $form['mongodb_node'] = array(
+      '#type' => 'fieldset',
+      '#title' => t('MongoDB'),
+      '#collapsible' => TRUE,
+      '#collapsed' => FALSE,
+      '#weight' => 30,
+      '#group' => 'additional_settings',
+    );
+
+    $form['mongodb_node']['mongodb_node_sync'] = array(
+      '#type' => 'checkbox',
+      '#title' => t('Enable permanent cache storage'),
+      '#default_value' => variable_get('mongodb_node_sync_'. $form['#node_type']->type, TRUE),
+    );
+  }
+}
+
+/**
+ * Implementation of hook_nodeapi().
+ */
+function mongodb_node_nodeapi(&$node, $op, $a3 = NULL, $a4 = NULL) {
+  // For all content types that require mongo permanent cache storage
+  if (!_MONGODB_ENABLED || !variable_get('mongodb_node_sync_' . $node->type, TRUE)) {
+    return;
+  }
+  $collection = mongodb_collection(_mongodb_node_collection_name());
+  if (!$collection) {
+    return;
+  }
+
+  switch ($op) {
+    case 'delete':
+      $collection->remove(array('nid' => (int) $node->nid), array("justOne" => TRUE));
+      break;
+    
+    case 'insert':
+    case 'update':
+      mongodb_node_mongo_update($node, $collection);
+      break;
+  }
+}
+
+/**
+ * Implementation of hook_comment().
+ */
+function mongodb_node_comment(&$a1, $op) {
+
+  $nid = is_object($a1) ? $a1->nid : $a1['nid'];
+  $node = mongodb_node_load($nid);
+
+  if (!_MONGODB_ENABLED || !variable_get('mongodb_node_sync_' . $node->type, TRUE)) {
+    return;
+  }
+
+  switch ($op) {
+    case 'publish':
+    case 'unpublish':
+    case 'delete':
+      $result = db_query('SELECT COUNT(*) AS comments_count FROM {comments} WHERE nid = %d AND status = 0', $nid);
+      $item = db_fetch_array($result);
+      if ($item['comments_count']) {
+        $node->comment_count = (int) $item['comments_count'];
+        mongodb_node_mongo_update($node);
+      }
+      break;
+  }
+}
+
+/**
+ * Update mongodb record
+ *
+ * @param object $node
+ * @param resource $collection
+ * @return bool
+ */
+function mongodb_node_mongo_update($node, $collection = NULL, $node_load_reset = TRUE) {
+  if (!$collection) {
+    $collection = mongodb_collection(_mongodb_node_collection_name());
+    if (!$collection) {
+      return FALSE;
+    }
+  }
+
+  // We should clear current node cache for forcing new load of cck fields
+  // See content_load() function in content.module
+  $cid = 'content:' . $node->nid . ':' . $node->vid;
+  cache_clear_all($cid, content_cache_tablename());
+  
+  // 1. (clone)$node is replaced by node_load() to ensure that node taxonomy field is well prepared
+  // 2. node_load contains "clean" object, without form submition variables
+  // 3. on insert and update action node_load returns object from static cache, so there is no additional performance impact
+  $m_node = node_load($node->nid, NULL, $node_load_reset);
+
+  
+  // We have node/%node/edit path on edit page.
+  // So menu_get_object call node_load and pull old (not saved yet)
+  // node object to fill %node placeholder.
+  //
+  // From node_load calls taxonomy_node_get_terms and put in $node->taxonomy old terms and store them
+  // in static var.
+  //
+  // Then when we call node_load($node->nid, NULL, TRUE)
+  // even with $reset var, terms static cache didn't cleared, so we need load it manually
+  $result = db_query(db_rewrite_sql('SELECT t.* FROM {term_node} r '.
+                      'INNER JOIN {term_data} t ON r.tid = t.tid '.
+                      'INNER JOIN {vocabulary} v ON t.vid = v.vid '.
+                      'WHERE r.vid = %d ORDER BY v.weight, t.weight, t.name', 't', 'tid'), $m_node->vid);
+  $terms = array();
+  while ($term = db_fetch_object($result)) {
+    $terms[$term->tid] = $term;
+  }
+  $m_node->taxonomy = $terms;
+  
+  _mongodb_node_prepare_node($m_node);
+
+  // Update mongodb record
+  return $collection->update(array('nid' => $m_node->nid), $m_node, array('upsert' => TRUE));
+}
+
+/**
+ * Returns collection name
+ */
+function _mongodb_node_collection_name() {
+  return 'node';
+}
+
+/**
+ * Prepares node object for saving
+ */
+function _mongodb_node_prepare_node(&$node) {
+  // We have to have to ensure integer values when inserting into MongoDB
+  foreach ($node as &$field) {
+    // for node table integers
+    if (is_numeric($field)) {
+      $field = (int) $field;
+    }
+    elseif(is_array($field) && isset($field[0]['value']) && is_numeric($field[0]['value'])) { // for cck field integers. TODO: if float - exclude
+      $field[0]['value'] = (int) $field[0]['value'];
+    }
+  }
+  // do not push service links html into MongoDB storage
+  // unset($node->...);
+  
+  if (count($node->taxonomy)) {
+    foreach ($node->taxonomy as &$term) {
+      $term->tid = (int) $term->tid;
+      $term->vid = (int) $term->vid;
+    }
+    $node->taxonomy = array_values($node->taxonomy);
+  }
+}
+
+/**
+ * Implementation of hook_mongodb_ensure_index().
+ */
+function mongodb_node_mongodb_ensure_index() {
+  $mongo = mongodb_instance();
+
+  // Create collection for nodes
+  $collection_name = _mongodb_node_collection_name();
+  $mongo->createCollection($collection_name);
+
+  $collection = $mongo->selectCollection($collection_name);
+  // Clean indexes
+  $collection->deleteIndexes();
+  // Ensure indexes
+  $collection->ensureIndex(array('nid' => 1), array('background' => TRUE, 'unique' => TRUE, 'dropDups' => TRUE));
+  $collection->ensureIndex(array('type' => 1), array('background' => TRUE));
+  $collection->ensureIndex(array('uid' => 1), array('background' => TRUE));
+  $collection->ensureIndex(array('status' => 1), array('background' => TRUE));
+  $collection->ensureIndex(array('created' => 1), array('background' => TRUE));
+  $collection->ensureIndex(array('taxonomy.tid' => 1), array('background' => TRUE));
+  $collection->ensureIndex(array('taxonomy.name' => 1), array('background' => TRUE));
+  $collection->ensureIndex(array('taxonomy.vid' => 1), array('background' => TRUE));
+
+  drupal_set_message(t('Ensured indexes for nodes'));
+}
+
+
+/**
+ * Common static storage implementation
+ * Set node to cache
+ *
+ * @staticvar array $nodes
+ * @param object $node
+ * @param bool $reset
+ */
+function mongodb_node_static_storage_set($node, $reset = FALSE) {
+  static $nodes = array();
+
+  if ($reset) {
+    $nodes = array();
+  }
+
+  if (is_object($node)) {
+    $nodes[$node->nid] = $node;
+  }
+  elseif (is_numeric($node) && isset($nodes[$node])) {
+    return drupal_clone($nodes[$node]);
+  }
+  return FALSE;
+}
+
+/**
+ * Common static storage implementation
+ * Get node from cache or return FALSE if not exists
+ */
+function mongodb_node_static_storage_get($nid, $reset = FALSE) {
+  return mongodb_node_static_storage_set($nid, $reset);
+}
+
+/**
+ * Check is mongodb available
+ *
+ * @return bool
+ */
+function mongodb_node_mongo_available() {
+  return variable_get('mongodb_enabled', FALSE) && 
+         module_exists('mongodb_node') && 
+         mongodb_collection(_mongodb_node_collection_name());
+}
+
+ /**
+ * Load node object from the database.
+ *
+ * @param $param
+ *   Either the nid of the node or an array of conditions to match against in the database query
+ * @param $revision
+ *   Which numbered revision to load. Defaults to the current version.
+ * @param $reset
+ *
+ * @return
+ *   A fully-populated node object.
+ */
+function mongodb_node_load($param = array(), $revision = NULL, $reset = NULL) {
+  $arguments = array();
+  if (is_numeric($param)) {
+    if ($revision == NULL) {
+      if ($node = mongodb_node_static_storage_get((int) $param, $reset)) {
+        return $node;
+      }
+    }
+    $arguments = array('nid' => (int) $param);
+  }
+  elseif (is_array($param)) {
+    // Turn the conditions into a query.
+    foreach ($param as $key => $value) {
+      $arguments[$key] = $key == 'nid' ? (int) $value : $value;
+    }
+  }
+  else {
+    return NULL;
+  }
+
+  // Connect with mongoDB
+  if (mongodb_node_mongo_available()) {
+    $collection = mongodb_collection(_mongodb_node_collection_name());
+    $node = $collection->findOne($arguments);
+    if (empty($node)) {
+      $node = node_load($param);
+    }
+    else {
+      $node = (object) $node;
+    }
+  }
+  else {
+    $node = node_load($param, $revision, $reset);
+  }
+
+  if (empty($node) || !is_object($node)) {
+    return NULL;
+  }
+
+  mongodb_node_static_storage_set($node);
+  return drupal_clone($node);
+}

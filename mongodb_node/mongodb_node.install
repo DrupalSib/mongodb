@@ -1,0 +1,22 @@
+<?php
+/**
+ * @file
+ * Installation for the module
+ */
+
+/**
+ * Implementation of hook_update().
+ */
+function mongodb_node_update_6000() {
+  $return[] = update_sql("UPDATE system SET weight = -1 WHERE type = 'module' AND name = 'mongodb_node'");
+  return $return;
+}
+
+/**
+ * Implementation of hook_update().
+ */
+function mongodb_node_update_6001() {
+  // We should run nodeapi after default modules to use node_load
+  $return[] = update_sql("UPDATE system SET weight = 9 WHERE type = 'module' AND name = 'mongodb_node'");
+  return $return;
+}

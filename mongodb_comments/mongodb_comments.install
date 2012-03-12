@@ -1,0 +1,13 @@
+<?php
+/**
+ * @file
+ * mongodb_comments module install file
+ */
+
+/**
+ * Implementation of hook_update().
+ */
+function mongodb_comments_update_6000() {
+  $return[] = update_sql("UPDATE system SET weight =  -1 WHERE type = 'module' AND name = 'mongodb_comments'");
+  return $return;
+}
