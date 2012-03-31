@@ -48,12 +48,13 @@ function mongodb_instance() {
 
   $conf = variable_get('mongo_url', '');
   $url  = parse_url($conf);
+  $replica = variable_get('mongo_replica', NULL);
   if (empty($url['host'])) {
     return NULL;
   }
 
   try {
-    $mongo_server = new Mongo($url['host']);
+    $mongo_server = ($replica) ? new Mongo($url['host'], array("replicaSet" => $replica)) : new Mongo($url['host']);
 
     $mongo_db = $mongo_server->selectDB(ltrim($url['path'], '/'));
 
