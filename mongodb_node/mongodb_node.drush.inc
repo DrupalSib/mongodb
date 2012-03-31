@@ -42,11 +42,12 @@ function drush_mongodb_node_sync_all() {
   if (!isset($type) && !isset($nid)) {
     drush_print(dt('Start to sync all nodes'));
   }
+
   if (isset($nid)) {
     $sub_query .= 'AND nid = %d ';
     $options[] = $nid;
   }
-  else {
+  elseif (isset($type)) {
     $sub_query .= 'AND type LIKE "%s" ';
     $options[] = $type;
     drush_print(dt('Start to sync nodes with type @type', array('@type' => $type)));
