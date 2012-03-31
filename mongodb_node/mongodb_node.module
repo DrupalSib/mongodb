@@ -286,3 +286,20 @@ function mongodb_node_load($param = array(), $revision = NULL, $reset = NULL) {
   mongodb_node_static_storage_set($node);
   return drupal_clone($node);
 }
+
+function mongodb_node_load_multiple($param = array(), $fields = array()) {
+  $nodes = array();
+
+  // Connect with mongoDB.
+  if (mongodb_node_mongo_available()) {
+    $collection = mongodb_collection(_mongodb_node_collection_name());
+    $cursor = $collection->find($param, $fields);
+
+    foreach ($cursor as $node) {
+      $node = (object) $node;
+      $nodes[] = drupal_clone($node);
+    }
+  }
+
+  return $nodes;
+}

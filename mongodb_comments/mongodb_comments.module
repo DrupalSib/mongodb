@@ -188,17 +188,17 @@ function mongo_comments_mongo_available() {
 function mongo_comments_comment_get_by_cids($cids) {
   // Mongodb way
   if (mongo_comments_mongo_available()) {
-    $comment = mongodb_query('comments',
-                              array('cid' => array('$in' => $cids))
-                              );
+    $comment = mongodb_query('comments', array('cid' => array('$in' => $cids)));
     $comments = array();
 
     if (is_array($comment)) {
-      foreach ($comment as $key => $value) {
+      foreach ($comment as $value) {
         $comments[$value['cid']] = (object) $value;
       }
     }
+
     $comments_to_load = array_diff($cids, array_keys($comments));
+
     if (!empty($comments_to_load)) {
       if (count($comments_to_load) > 1) {
         $placeholder = " IN (" . implode(', ', array_fill(0, sizeof($comments_to_load), '%d')) . ")";
@@ -206,17 +206,29 @@ function mongo_comments_comment_get_by_cids($cids) {
       else {
         $placeholder = " = %d";
       }
-      // Pull all missed comments from MySQL
-      $cresult = db_query("SELECT c.cid as cid, c.pid, c.nid, c.subject, c.comment, c.format, c.timestamp, c.name, c.mail, c.homepage, u.uid, u.name AS registered_name, u.signature, u.picture, u.data, c.thread, c.status FROM {comments} c INNER JOIN {users} u ON c.uid = u.uid WHERE c.cid $placeholder", $comments_to_load);
+
+      // Pull all missed comments from MySQL.
+      $cresult = db_query(
+        'SELECT c.cid as cid, c.pid, c.nid, c.subject, c.comment, c.format, c.timestamp, c.name, c.mail, c.homepage, ' . 
+        'u.uid, u.name AS registered_name, u.signature, u.picture, u.data, c.thread, c.status ' . 
+        'FROM {comments} c ' . 
+        'INNER JOIN {users} u ON c.uid = u.uid ' . 
+        "WHERE c.cid $placeholder", 
+        $comments_to_load
+      );
+
       while ($comment = db_fetch_object($cresult)) {
         $comments[$comment->cid] = $comment;
       }
-      watchdog(_MONGODB_LOG, 'There was an error while fetch comments from MongoDB. ' .
-                              'Following comments are not loaded: %cids', array('%cids' => implode(', ', $comments_to_load)));
+
+      watchdog(
+        _MONGODB_LOG, 
+        'There was an error while fetch comments from MongoDB. Following comments are not loaded: %cids', 
+        array('%cids' => implode(', ', $comments_to_load))
+      );
     }
-    
-    $comments = _mongo_comments_comment_sort_by_cids($cids, $pre_comments);
-    return $comments;
+
+    return _mongo_comments_comment_sort_by_cids($cids, $comments);
   }
   // If mongo unavailable - load comments from MySQL.
   else {
@@ -226,31 +238,35 @@ function mongo_comments_comment_get_by_cids($cids) {
     else {
       $placeholder = " = %d";
     }
+
     $cresult = db_query("SELECT c.cid as cid, c.pid, c.nid, c.subject, c.comment, 
       c.format, c.timestamp, c.name, c.mail, c.homepage, u.uid, u.name AS registered_name,
       u.signature, u.picture, u.data, c.thread, c.status FROM {comments} c INNER JOIN {users} u ON c.uid = u.uid
       WHERE c.cid $placeholder", $cids);
+
     while ($comment = db_fetch_object($cresult)) {
-      $pre_comments[$comment->cid] = $comment;
+      $comments[$comment->cid] = $comment;
     }
     
-    $comments = _mongo_comments_comment_sort_by_cids($cids, $pre_comments);
-    return $comments;
+    return _mongo_comments_comment_sort_by_cids($cids, $comments);
   }
 }
 
 /**
- * sort comment by cids
+ * Sort comment by cids.
  *
  * @param array $cids
  * @param array $pre_comments
  * @return array
  */
 function _mongo_comments_comment_sort_by_cids($cids, $pre_comments) {
+  $comments = array();
+
   foreach ($cids as $cid) {
     if (!empty($pre_comments[$cid])) {
       $comments[$cid] = $pre_comments[$cid];
     }
   }
+
   return $comments;
 }
