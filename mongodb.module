@@ -254,7 +254,13 @@ function mongodb_nodes_get_from_mongo($nids) {
     }
   }
 
-  return $nodes;
+  $result = array();
+
+  foreach ($nids as $nid) {
+    $result[$nid] = $nodes[$nid];
+  }
+
+  return $result;
 }
 
 /**
