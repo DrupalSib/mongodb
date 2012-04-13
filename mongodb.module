@@ -331,7 +331,8 @@ function _mongodb_node_render(&$vars, $node, $options) {
   $node->build_mode = ($options['build_mode'] == 'teaser' || $options['build_mode'] == 'full') ? NODE_BUILD_NORMAL : $options['build_mode'];
 
   $vars['origin_node'] = $node;
-  $vars['node'] = mongodb_node_view($node, $options['build_mode'] == 'teaser', FALSE, $options['links']);
+  $vars['node'] = node_view($node, $options['build_mode'] == 'teaser', FALSE, $options['links']);
+//  $vars['node'] = mongodb_node_view($node, $options['build_mode'] == 'teaser', FALSE, $options['links']);
   if (!empty($options['comments']) && function_exists('comment_render')) {
     $vars['comments'] = comment_render($node);
   }
